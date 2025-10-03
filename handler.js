@@ -10,7 +10,7 @@ const readdir = promisify(fs.readdir)
 const stat = promisify(fs.stat)
 
 // ═══════════════════════════════════════════════════
-// CRIMSON HANDLER - ADVANCED PLUGIN SYSTEM
+// CRIMSON HANDLER - PLUGIN SYSTEM
 // ═══════════════════════════════════════════════════
 
 class CrimsonHandler {
