@@ -5,7 +5,8 @@ import chalk from 'chalk'
 import { promisify } from 'util'
 import chokidar from 'chokidar'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 const readdir = promisify(fs.readdir)
 const stat = promisify(fs.stat)
 
@@ -45,7 +46,7 @@ class CrimsonHandler {
     // ═══════════════════════════════════════════════════
 
     async initialize() {
-        console.log(chalk.blue('⚙️  Initializing handler...'))
+        console.log(chalk.blue('⚙️  Initializing Crimson Handler...'))
 
         await this.setupMiddleware()
         await this.setupHooks()
@@ -53,7 +54,7 @@ class CrimsonHandler {
         await this.loadPlugins()
         await this.startPluginWatcher()
 
-        console.log(chalk.green('✓ Handler initialized successfully'))
+        console.log(chalk.green('✓ Crimson Handler initialized successfully'))
     }
 
     async setupMiddleware() {
@@ -169,8 +170,9 @@ class CrimsonHandler {
                 await this.unloadPlugin(pluginName)
             }
 
-            // استخدام import بدلاً من require
-            const module = await import(`${filePath}?update=${Date.now()}`)
+            // استخدام file:// للاستيراد الصحيح في ES6 Modules
+            const fileUrl = `file://${filePath}?update=${Date.now()}`
+            const module = await import(fileUrl)
             const plugin = module.default
 
             if (!plugin) {
@@ -224,11 +226,7 @@ class CrimsonHandler {
         this.plugins.delete(pluginName)
         this.pluginStats.delete(pluginName)
 
-        // إزالة من ذاكرة التخزين المؤقت للوحدات النمطية
-        const moduleUrl = `${plugin.filePath}?update=${Date.now()}`
-        if (moduleUrl in require.cache) {
-            delete require.cache[moduleUrl]
-        }
+        console.log(chalk.yellow(`  ✓ Unloaded: ${pluginName}`))
     }
 
     async reloadPlugin(pluginName) {
@@ -391,10 +389,12 @@ class CrimsonHandler {
         if (!plugin) return
 
         try {
+            // تنفيذ before hooks
             for (const hook of this.hooks.beforeCommand) {
                 await hook(m, plugin, args)
             }
 
+            // تنفيذ middleware
             for (const middleware of this.middleware) {
                 const result = await middleware(m, messageData, plugin)
                 if (result === false) return
@@ -402,9 +402,17 @@ class CrimsonHandler {
 
             const context = this.buildContext(m, messageData, plugin)
 
-            // استدعاء الدالة handler بدلاً من plugin مباشرة
-            const result = await plugin.handler(m, context)
+            // تنفيذ الأمر - دعم كل أنواع الاضافات
+            let result;
+            if (typeof plugin === 'function') {
+                result = await plugin(m, context)
+            } else if (typeof plugin.handler === 'function') {
+                result = await plugin.handler(m, context)
+            } else {
+                throw new Error('Plugin does not have a valid handler function')
+            }
 
+            // تنفيذ after hooks
             for (const hook of this.hooks.afterCommand) {
                 await hook(m, plugin, result)
             }
@@ -414,7 +422,7 @@ class CrimsonHandler {
             }
 
         } catch (error) {
-            console.error(chalk.red(`❌ Command error [${command}]:`, error.message))
+            console.error(chalk.red(`❌ Command error [${command}]:`), error)
 
             for (const hook of this.hooks.onError) {
                 await hook(m, plugin, error)
@@ -465,11 +473,23 @@ class CrimsonHandler {
             mentionedJid: messageData.mentionedJid,
             isMedia: messageData.isMedia,
             messageType: messageData.messageType,
-            reply: async (text, options) => await this.bot.reply(messageData.from, text, m, options),
-            send: async (content, options) => await this.bot.sendMessage(messageData.from, content, options),
-            react: async (emoji) => await this.react(m, emoji),
-            delete: async () => await this.deleteMessage(m),
-            download: async () => await this.bot.downloadMediaMessage(m),
+            
+            // الدوال المساعدة
+            reply: async (text, options) => {
+                return await this.bot.reply(messageData.from, text, m, options)
+            },
+            send: async (content, options) => {
+                return await this.bot.sendMessage(messageData.from, content, options)
+            },
+            react: async (emoji) => {
+                return await this.react(m, emoji)
+            },
+            delete: async () => {
+                return await this.deleteMessage(m)
+            },
+            download: async () => {
+                return await this.bot.downloadMediaMessage(m)
+            }
         }
     }
 
@@ -533,7 +553,6 @@ class CrimsonHandler {
     async checkCooldown(m, data, plugin) {
         if (data.isOwner || data.isSubOwner) return true
 
-        // استخدام cooldown من الإضافة
         if (!plugin.cooldown) return true
 
         const key = `${data.sender}-${data.command}`
@@ -651,7 +670,7 @@ class CrimsonHandler {
                 }
             })
         } catch (error) {
-            console.error(chalk.red('Failed to send reaction:', error.message))
+            console.error(chalk.red('Failed to send reaction:'), error)
         }
     }
 
@@ -661,7 +680,7 @@ class CrimsonHandler {
                 delete: m.key
             })
         } catch (error) {
-            console.error(chalk.red('Failed to delete message:', error.message))
+            console.error(chalk.red('Failed to delete message:'), error)
         }
     }
 
@@ -675,7 +694,7 @@ class CrimsonHandler {
         try {
             await this.bot.sendText(chatId, errorText)
         } catch (e) {
-            console.error(chalk.red('Failed to send error message:', e.message))
+            console.error(chalk.red('Failed to send error message:'), e)
         }
     }
 
@@ -700,7 +719,20 @@ class CrimsonHandler {
     }
 
     async saveCommandHistory(m, plugin, result) {
-        // Save to database
+        // حفظ في قاعدة البيانات
+        try {
+            const historyData = {
+                plugin: plugin.fileName?.replace('.js', '') || 'unknown',
+                command: plugin.command || 'unknown',
+                user: m.sender,
+                chat: m.chat,
+                timestamp: Date.now(),
+                result: result ? 'success' : 'failed'
+            }
+            await this.db.saveCommandHistory(historyData)
+        } catch (error) {
+            console.error(chalk.red('Failed to save command history:'), error)
+        }
     }
 
     async handleCommandError(m, plugin, error) {
@@ -816,7 +848,6 @@ class CrimsonHandler {
         }
 
         plugin.disabled = false
-        await this.db.updatePluginStatus(pluginName, true)
         console.log(chalk.green(`✓ Enabled plugin: ${pluginName}`))
     }
 
@@ -827,7 +858,6 @@ class CrimsonHandler {
         }
 
         plugin.disabled = true
-        await this.db.updatePluginStatus(pluginName, false)
         console.log(chalk.yellow(`⚠️  Disabled plugin: ${pluginName}`))
     }
 
