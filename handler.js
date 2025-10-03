@@ -38,6 +38,12 @@ class CrimsonHandler {
         this.isWatching = false
         this.loadQueue = []
         this.isProcessingQueue = false
+        this.reloadCount = 0
+        this.maxReloads = 10
+        this.reloadResetTime = 60000 // 1 minute
+        this.lastReloadTime = Date.now()
+        this.cache = new Map()
+        this.cacheExpiry = 300000 // 5 minutes
     }
 
     // ═══════════════════════════════════════════════════
@@ -52,6 +58,9 @@ class CrimsonHandler {
         await this.setupPermissions()
         await this.loadPlugins()
         await this.startPluginWatcher()
+        
+        // Setup cache cleanup interval
+        setInterval(() => this.cleanupCache(), this.cacheExpiry)
 
         console.log(chalk.green('✓ Handler initialized successfully'))
     }
@@ -122,7 +131,8 @@ class CrimsonHandler {
         let loaded = 0
         let failed = 0
 
-        for (const file of files) {
+        // Load plugins in parallel for better performance
+        const loadPromises = files.map(async (file) => {
             try {
                 await this.loadPlugin(file)
                 loaded++
@@ -132,7 +142,9 @@ class CrimsonHandler {
                 console.log(chalk.red(`  ✗ Failed to load: ${path.basename(file)}`))
                 console.log(chalk.red(`    Error: ${error.message}`))
             }
-        }
+        })
+
+        await Promise.all(loadPromises)
 
         console.log(chalk.green(`\n✓ Plugins loaded: ${loaded}`))
         if (failed > 0) {
@@ -169,7 +181,13 @@ class CrimsonHandler {
                 await this.unloadPlugin(pluginName)
             }
 
-            const module = await import(`${filePath}?update=${Date.now()}`)
+            // Clear module cache to ensure fresh import
+            const modulePath = `${filePath}?update=${Date.now()}`
+            if (require.cache[require.resolve(modulePath)]) {
+                delete require.cache[require.resolve(modulePath)]
+            }
+
+            const module = await import(modulePath)
             const plugin = module.default
 
             if (!plugin) {
@@ -180,16 +198,27 @@ class CrimsonHandler {
                 throw new Error('Plugin must have command or commands property')
             }
 
+            // Validate plugin structure
+            if (typeof plugin !== 'function') {
+                throw new Error('Plugin must be a function')
+            }
+
             plugin.filePath = filePath
             plugin.fileName = fileName
             plugin.loadedAt = Date.now()
+            plugin.disabled = plugin.disabled || false
 
             const commands = Array.isArray(plugin.command) ? plugin.command : [plugin.command]
             if (plugin.commands) {
                 commands.push(...plugin.commands)
             }
 
+            // Validate command names
             for (const cmd of commands) {
+                if (typeof cmd !== 'string' || cmd.length === 0) {
+                    throw new Error(`Invalid command name: ${cmd}`)
+                }
+                
                 if (this.commands.has(cmd)) {
                     console.log(chalk.yellow(`  ⚠ Command '${cmd}' already exists, overwriting`))
                 }
@@ -224,11 +253,28 @@ class CrimsonHandler {
         this.pluginStats.delete(pluginName)
 
         if (plugin.filePath) {
-            delete require.cache[require.resolve(plugin.filePath)]
+            const modulePath = require.resolve(plugin.filePath)
+            if (require.cache[modulePath]) {
+                delete require.cache[modulePath]
+            }
         }
     }
 
     async reloadPlugin(pluginName) {
+        // Check reload rate limit
+        const now = Date.now()
+        if (now - this.lastReloadTime > this.reloadResetTime) {
+            this.reloadCount = 0
+            this.lastReloadTime = now
+        }
+
+        if (this.reloadCount >= this.maxReloads) {
+            const waitTime = Math.ceil((this.lastReloadTime + this.reloadResetTime - now) / 1000)
+            throw new Error(`Reload rate limit exceeded. Please wait ${waitTime} seconds.`)
+        }
+
+        this.reloadCount++
+
         const plugin = this.plugins.get(pluginName)
         if (!plugin || !plugin.filePath) {
             throw new Error('Plugin not found or no file path')
@@ -247,15 +293,23 @@ class CrimsonHandler {
         let reloaded = 0
         let failed = 0
 
-        for (const name of pluginNames) {
+        // Reset reload count for full reload
+        this.reloadCount = 0
+        this.lastReloadTime = Date.now()
+
+        // Reload plugins in parallel
+        const reloadPromises = pluginNames.map(async (name) => {
             try {
                 await this.reloadPlugin(name)
                 reloaded++
             } catch (error) {
                 failed++
                 console.log(chalk.red(`  ✗ Failed to reload: ${name}`))
+                console.log(chalk.red(`    Error: ${error.message}`))
             }
-        }
+        })
+
+        await Promise.all(reloadPromises)
 
         console.log(chalk.green(`\n✓ Reloaded: ${reloaded} plugins`))
         if (failed > 0) {
@@ -319,6 +373,9 @@ class CrimsonHandler {
             .on('add', (filePath) => this.handlePluginAdd(filePath))
             .on('change', (filePath) => this.handlePluginChange(filePath))
             .on('unlink', (filePath) => this.handlePluginRemove(filePath))
+            .on('error', (error) => {
+                console.error(chalk.red('Plugin watcher error:'), error.message)
+            })
 
         this.isWatching = true
         console.log(chalk.green('✓ Plugin watcher started'))
@@ -385,7 +442,7 @@ class CrimsonHandler {
         const { command, args, text } = messageData
 
         const plugin = this.getPlugin(command)
-        if (!plugin) return
+        if (!plugin || plugin.disabled) return
 
         try {
             for (const hook of this.hooks.beforeCommand) {
@@ -399,7 +456,12 @@ class CrimsonHandler {
 
             const context = this.buildContext(m, messageData, plugin)
 
+            const startTime = Date.now()
             const result = await plugin(m, context)
+            const executionTime = Date.now() - startTime
+
+            // Update execution time stats
+            this.updateExecutionTimeStats(plugin, executionTime)
 
             for (const hook of this.hooks.afterCommand) {
                 await hook(m, plugin, result)
@@ -421,16 +483,33 @@ class CrimsonHandler {
     }
 
     getPlugin(command) {
+        // Check cache first
+        if (this.cache.has(`plugin:${command}`)) {
+            const cached = this.cache.get(`plugin:${command}`)
+            if (Date.now() < cached.expiry) {
+                return cached.value
+            }
+            this.cache.delete(`plugin:${command}`)
+        }
+
+        let plugin = null
+
         if (this.commands.has(command)) {
-            return this.commands.get(command)
-        }
-
-        if (this.aliases.has(command)) {
+            plugin = this.commands.get(command)
+        } else if (this.aliases.has(command)) {
             const mainCommand = this.aliases.get(command)
-            return this.commands.get(mainCommand)
+            plugin = this.commands.get(mainCommand)
         }
 
-        return null
+        // Cache the result
+        if (plugin) {
+            this.cache.set(`plugin:${command}`, {
+                value: plugin,
+                expiry: Date.now() + 60000 // Cache for 1 minute
+            })
+        }
+
+        return plugin
     }
 
     buildContext(m, messageData, plugin) {
@@ -466,6 +545,11 @@ class CrimsonHandler {
             react: async (emoji) => await this.react(m, emoji),
             delete: async () => await this.deleteMessage(m),
             download: async () => await this.bot.downloadMediaMessage(m),
+            // Add utility functions
+            sanitizeInput: (input) => this.sanitizeInput(input),
+            getCache: (key) => this.getCache(key),
+            setCache: (key, value, ttl = 60000) => this.setCache(key, value, ttl),
+            deleteCache: (key) => this.deleteCache(key)
         }
     }
 
@@ -476,14 +560,48 @@ class CrimsonHandler {
     async checkBlacklist(m, data, plugin) {
         if (data.isOwner) return true
 
+        // Check cache first
+        const blacklistCacheKey = `blacklist:${data.sender}`
+        if (this.cache.has(blacklistCacheKey)) {
+            const cached = this.cache.get(blacklistCacheKey)
+            if (Date.now() < cached.expiry) {
+                return !cached.value
+            }
+            this.cache.delete(blacklistCacheKey)
+        }
+
         const isBlacklisted = await this.db.isBlacklisted(data.sender)
+        
+        // Cache the result
+        this.cache.set(blacklistCacheKey, {
+            value: isBlacklisted,
+            expiry: Date.now() + 300000 // Cache for 5 minutes
+        })
+
         if (isBlacklisted) {
             console.log(chalk.yellow(`⚠️  Blacklisted user: ${data.sender}`))
             return false
         }
 
         if (data.isGroup) {
+            const groupBlacklistCacheKey = `groupBlacklist:${data.from}`
+            
+            if (this.cache.has(groupBlacklistCacheKey)) {
+                const cached = this.cache.get(groupBlacklistCacheKey)
+                if (Date.now() < cached.expiry) {
+                    return !cached.value
+                }
+                this.cache.delete(groupBlacklistCacheKey)
+            }
+
             const isGroupBlacklisted = await this.db.isGroupBlacklisted(data.from)
+            
+            // Cache the result
+            this.cache.set(groupBlacklistCacheKey, {
+                value: isGroupBlacklisted,
+                expiry: Date.now() + 300000 // Cache for 5 minutes
+            })
+
             if (isGroupBlacklisted) {
                 console.log(chalk.yellow(`⚠️  Blacklisted group: ${data.from}`))
                 return false
@@ -496,7 +614,27 @@ class CrimsonHandler {
     async checkMaintenance(m, data, plugin) {
         if (data.isOwner) return true
 
+        // Check cache first
+        const maintenanceCacheKey = 'maintenance'
+        if (this.cache.has(maintenanceCacheKey)) {
+            const cached = this.cache.get(maintenanceCacheKey)
+            if (Date.now() < cached.expiry) {
+                if (cached.value) {
+                    await this.bot.reply(data.from, '⚠️ البوت في وضع الصيانة حالياً. يرجى المحاولة لاحقاً.', m)
+                }
+                return !cached.value
+            }
+            this.cache.delete(maintenanceCacheKey)
+        }
+
         const inMaintenance = await this.db.isMaintenanceMode()
+        
+        // Cache the result
+        this.cache.set(maintenanceCacheKey, {
+            value: inMaintenance,
+            expiry: Date.now() + 60000 // Cache for 1 minute
+        })
+
         if (inMaintenance) {
             await this.bot.reply(data.from, '⚠️ البوت في وضع الصيانة حالياً. يرجى المحاولة لاحقاً.', m)
             return false
@@ -591,7 +729,29 @@ class CrimsonHandler {
         }
 
         if (plugin.premium) {
+            const premiumCacheKey = `premium:${data.sender}`
+            
+            // Check cache first
+            if (this.cache.has(premiumCacheKey)) {
+                const cached = this.cache.get(premiumCacheKey)
+                if (Date.now() < cached.expiry) {
+                    if (!cached.value && !data.isOwner) {
+                        await this.bot.reply(data.from, '❌ هذا الأمر للمشتركين المميزين فقط.', m)
+                        return false
+                    }
+                    return cached.value || data.isOwner
+                }
+                this.cache.delete(premiumCacheKey)
+            }
+
             const isPremium = await this.db.isPremiumUser(data.sender)
+            
+            // Cache the result
+            this.cache.set(premiumCacheKey, {
+                value: isPremium,
+                expiry: Date.now() + 300000 // Cache for 5 minutes
+            })
+
             if (!isPremium && !data.isOwner) {
                 await this.bot.reply(data.from, '❌ هذا الأمر للمشتركين المميزين فقط.', m)
                 return false
@@ -599,7 +759,29 @@ class CrimsonHandler {
         }
 
         if (plugin.registered) {
+            const registeredCacheKey = `registered:${data.sender}`
+            
+            // Check cache first
+            if (this.cache.has(registeredCacheKey)) {
+                const cached = this.cache.get(registeredCacheKey)
+                if (Date.now() < cached.expiry) {
+                    if (!cached.value) {
+                        await this.bot.reply(data.from, `❌ يجب التسجيل أولاً. استخدم ${this.config.prefix}register`, m)
+                        return false
+                    }
+                    return cached.value
+                }
+                this.cache.delete(registeredCacheKey)
+            }
+
             const isRegistered = await this.db.isRegisteredUser(data.sender)
+            
+            // Cache the result
+            this.cache.set(registeredCacheKey, {
+                value: isRegistered,
+                expiry: Date.now() + 300000 // Cache for 5 minutes
+            })
+
             if (!isRegistered) {
                 await this.bot.reply(data.from, `❌ يجب التسجيل أولاً. استخدم ${this.config.prefix}register`, m)
                 return false
@@ -688,6 +870,55 @@ class CrimsonHandler {
     }
 
     // ═══════════════════════════════════════════════════
+    // CACHE UTILITIES
+    // ═══════════════════════════════════════════════════
+
+    getCache(key) {
+        if (this.cache.has(key)) {
+            const cached = this.cache.get(key)
+            if (Date.now() < cached.expiry) {
+                return cached.value
+            }
+            this.cache.delete(key)
+        }
+        return null
+    }
+
+    setCache(key, value, ttl = 60000) {
+        this.cache.set(key, {
+            value,
+            expiry: Date.now() + ttl
+        })
+    }
+
+    deleteCache(key) {
+        return this.cache.delete(key)
+    }
+
+    cleanupCache() {
+        const now = Date.now()
+        for (const [key, value] of this.cache.entries()) {
+            if (now >= value.expiry) {
+                this.cache.delete(key)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════
+    // INPUT SANITIZATION
+    // ═══════════════════════════════════════════════════
+
+    sanitizeInput(input) {
+        if (typeof input !== 'string') return input
+        
+        return input
+            .replace(/javascript:/gi, '')
+            .replace(/on\w+=/gi, '')
+            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+            .trim()
+    }
+
+    // ═══════════════════════════════════════════════════
     // STATISTICS
     // ═══════════════════════════════════════════════════
 
@@ -698,13 +929,30 @@ class CrimsonHandler {
             failureCount: 0,
             lastUsed: null,
             averageExecutionTime: 0,
-            totalExecutionTime: 0
+            totalExecutionTime: 0,
+            executionTimes: []
         })
     }
 
     async updateCommandStats(command) {
         const currentCount = this.commandUsage.get(command) || 0
         this.commandUsage.set(command, currentCount + 1)
+    }
+
+    updateExecutionTimeStats(plugin, executionTime) {
+        const pluginName = plugin.fileName?.replace('.js', '') || 'unknown'
+        const stats = this.pluginStats.get(pluginName)
+        
+        if (stats) {
+            stats.executionTimes.push(executionTime)
+            stats.totalExecutionTime += executionTime
+            stats.averageExecutionTime = stats.totalExecutionTime / stats.executionTimes.length
+            
+            // Keep only the last 100 execution times
+            if (stats.executionTimes.length > 100) {
+                stats.executionTimes.shift()
+            }
+        }
     }
 
     async saveCommandHistory(m, plugin, result) {
@@ -806,7 +1054,8 @@ class CrimsonHandler {
             for (const pluginName of plugins) {
                 const plugin = this.plugins.get(pluginName)
                 const commands = Array.isArray(plugin.command) ? plugin.command : [plugin.command]
-                console.log(chalk.white(`  • ${pluginName}`), chalk.gray(`(${commands.join(', ')})`))
+                const status = plugin.disabled ? chalk.red('[DISABLED]') : chalk.green('[ENABLED]')
+                console.log(chalk.white(`  • ${pluginName}`), chalk.gray(`(${commands.join(', ')})`), status)
             }
         }
 
@@ -855,6 +1104,7 @@ class CrimsonHandler {
 
         this.cooldowns.clear()
         this.loadQueue = []
+        this.cache.clear()
 
         console.log(chalk.green('✓ Handler cleanup completed'))
     }
