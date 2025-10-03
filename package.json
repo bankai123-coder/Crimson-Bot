@@ -1,0 +1,72 @@
+{
+  "name": "crimson-bot",
+  "version": "3.0.0",
+  "description": "Advanced WhatsApp Bot with JSON Database",
+  "main": "Index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node Index.js",
+    "dev": "node --watch Index.js",
+    "test": "node --test",
+    "clean": "rm -rf auth store.json",
+    "backup": "node -e \"import('./database.js').then(db => db.default.createBackup())\""
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "baileys",
+    "crimson",
+    "whatsapp-bot",
+    "multi-device"
+  ],
+  "author": "Crimson Team",
+  "license": "MIT",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.8",
+    "anime-wallpaper": "^1.0.2",
+    "awesome-phonenumber": "^6.11.5",
+    "axios": "^1.12.2",
+    "chalk": "^5.3.0",
+    "cheerio": "^1.0.0",
+    "chokidar": "^3.6.0",
+    "file-type": "^19.5.0",
+    "form-data": "^4.0.0",
+    "google-translate-api-x": "^10.7.1",
+    "instagram-url-direct": "^1.0.13",
+    "jimp": "^1.6.0",
+    "lodash": "^4.17.21",
+    "mal-scraper": "^2.11.4",
+    "moment-timezone": "^0.5.45",
+    "node-cache": "^5.1.2",
+    "node-fetch": "^3.3.2",
+    "node-gtts": "^2.0.2",
+    "node-webpmux": "^3.1.7",
+    "openai": "^4.63.0",
+    "pino": "^9.4.0",
+    "pino-pretty": "^11.2.2",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "quick.db": "^9.1.7",
+    "spotify-url-info": "^3.2.12",
+    "weather-js": "^2.0.0",
+    "yt-search": "^2.13.1",
+    "ytdl-core": "^4.11.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/crimson-bot/crimson"
+  },
+  "bugs": {
+    "url": "https://github.com/crimson-bot/crimson/issues"
+  },
+  "homepage": "https://github.com/crimson-bot/crimson#readme"
+}
