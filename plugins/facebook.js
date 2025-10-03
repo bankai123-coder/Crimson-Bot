@@ -174,7 +174,7 @@ const handler = async (m, { conn, text, quoted, sender }) => {
 └─ 🌐 المصدر: Facebook
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-🤖 Crimson Bot | تحميل احترافي`,
+🤖 Crimson Bot | تحميل فيسبوك`,
             mentions: [sender]
         }, { quoted: m });
 
