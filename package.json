@@ -37,6 +37,7 @@
     "instagram-url-direct": "^1.0.13",
     "jimp": "^1.6.0",
     "lodash": "^4.17.21",
+    "lowdb": "^7.0.1",
     "mal-scraper": "^2.11.4",
     "moment-timezone": "^0.5.45",
     "node-cache": "^5.1.2",
