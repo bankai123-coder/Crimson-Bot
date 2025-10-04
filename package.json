@@ -1,5 +1,5 @@
 {
-  "name": "crimson-bot",
+  "name": "CRIMSON-BOT",
   "version": "3.0.0",
   "description": "Advanced WhatsApp Bot with JSON Database",
   "main": "Index.js",
@@ -67,10 +67,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/crimson-bot/crimson"
+    "url": "https://github.com/bankai123-coder/Crimson-Bot.git"
   },
   "bugs": {
-    "url": "https://github.com/crimson-bot/crimson/issues"
+    "url": "https://github.com/bankai123-coder/Crimson-Bot/issues"
   },
-  "homepage": "https://github.com/crimson-bot/crimson#readme"
+  "homepage": "https://github.com/bankai123-coder/Crimson-Bot#readme"
 }

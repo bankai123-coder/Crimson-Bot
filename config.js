@@ -7,7 +7,7 @@ const config = {
     // BOT INFORMATION
     // ═══════════════════════════════════════════════════
 
-    botName: 'Crimson',
+    botName: 'CRIMSON-BOT',
     botNumber: '22234001933',
     ownerNumber: '22232157828',
 
@@ -228,7 +228,7 @@ const config = {
     // ═══════════════════════════════════════════════════
 
     socialMedia: {
-        github: 'https://github.com/crimson-bot',
+        github: 'https://github.com/bankai123-coder/Crimson-Bot.git',
         youtube: 'https://youtube.com/@crimsonbot',
         instagram: 'https://instagram.com/crimsonbot',
         telegram: 'https://t.me/crimsonbot',
