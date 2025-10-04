@@ -10,10 +10,6 @@ const __dirname = path.dirname(__filename)
 const readdir = promisify(fs.readdir)
 const stat = promisify(fs.stat)
 
-// ═══════════════════════════════════════════════════
-// CRIMSON HANDLER - PLUGIN SYSTEM
-// ═══════════════════════════════════════════════════
-
 class CrimsonHandler {
     constructor(bot, db, config) {
         this.bot = bot
@@ -22,7 +18,6 @@ class CrimsonHandler {
         this.plugins = new Map()
         this.commands = new Map()
         this.categories = new Map()
-        this.aliases = new Map()
         this.cooldowns = new Map()
         this.permissions = new Map()
         this.middleware = []
@@ -37,75 +32,40 @@ class CrimsonHandler {
         this.failedPlugins = new Map()
         this.watcher = null
         this.isWatching = false
-        this.loadQueue = []
-        this.isProcessingQueue = false
     }
-
-    // ═══════════════════════════════════════════════════
-    // INITIALIZATION
-    // ═══════════════════════════════════════════════════
 
     async initialize() {
         console.log(chalk.blue('⚙️  Initializing Crimson Handler...'))
-
-        await this.setupMiddleware()
-        await this.setupHooks()
-        await this.setupPermissions()
+        await this.setup()
         await this.loadPlugins()
         await this.startPluginWatcher()
-
         console.log(chalk.green('✓ Crimson Handler initialized successfully'))
     }
 
-    async setupMiddleware() {
+    async setup() {
         this.middleware.push(
             this.checkBlacklist.bind(this),
             this.checkMaintenance.bind(this),
-            this.checkAntiSpam.bind(this),
             this.checkCooldown.bind(this),
             this.checkPermissions.bind(this),
             this.logCommand.bind(this),
             this.validateArgs.bind(this)
         )
-    }
 
-    async setupHooks() {
-        this.hooks.beforeCommand.push(async (m, cmd, args) => {
-            await this.updateCommandStats(cmd.command)
-        })
+        this.hooks.beforeCommand.push(async (m, cmd) => this.updateCommandStats(cmd.command[0]))
+        this.hooks.afterCommand.push(async (m, cmd, result) => this.saveCommandHistory(m, cmd, result))
+        this.hooks.onError.push(async (m, cmd, error) => this.handleCommandError(m, cmd, error))
+        this.hooks.onSuccess.push(async (m, cmd) => this.incrementSuccessCount(cmd.command[0]))
 
-        this.hooks.afterCommand.push(async (m, cmd, result) => {
-            await this.saveCommandHistory(m, cmd, result)
-        })
-
-        this.hooks.onError.push(async (m, cmd, error) => {
-            await this.handleCommandError(m, cmd, error)
-        })
-
-        this.hooks.onSuccess.push(async (m, cmd) => {
-            await this.incrementSuccessCount(cmd.command)
-        })
-    }
-
-    async setupPermissions() {
         this.permissions.set('owner', (data) => data.isOwner)
-        this.permissions.set('sub_owner', (data) => data.isSubOwner || data.isOwner)
-        this.permissions.set('moderator', (data) => data.isModerator || data.isSubOwner || data.isOwner)
-        this.permissions.set('admin', (data) => data.isAdmin || data.isModerator || data.isSubOwner || data.isOwner)
+        this.permissions.set('admin', (data) => data.isAdmin || data.isOwner)
         this.permissions.set('group', (data) => data.isGroup)
         this.permissions.set('private', (data) => !data.isGroup)
         this.permissions.set('botAdmin', (data) => data.isBotAdmin)
-        this.permissions.set('premium', async (data) => await this.db.isPremiumUser(data.sender))
-        this.permissions.set('registered', async (data) => await this.db.isRegisteredUser(data.sender))
     }
-
-    // ═══════════════════════════════════════════════════
-    // PLUGIN LOADING
-    // ═══════════════════════════════════════════════════
 
     async loadPlugins() {
         console.log(chalk.blue('\n📦 Loading plugins...'))
-
         const pluginsDir = path.join(__dirname, 'plugins')
         if (!fs.existsSync(pluginsDir)) {
             fs.mkdirSync(pluginsDir, { recursive: true })
@@ -114,15 +74,12 @@ class CrimsonHandler {
         }
 
         const files = await this.getPluginFiles(pluginsDir)
-        
         if (files.length === 0) {
             console.log(chalk.yellow('  ⚠ No plugins found'))
             return
         }
 
-        let loaded = 0
-        let failed = 0
-
+        let loaded = 0, failed = 0
         for (const file of files) {
             try {
                 await this.loadPlugin(file)
@@ -130,84 +87,51 @@ class CrimsonHandler {
             } catch (error) {
                 failed++
                 this.failedPlugins.set(file, error.message)
-                console.log(chalk.red(`  ✗ Failed to load: ${path.basename(file)}`))
-                console.log(chalk.red(`    Error: ${error.message}`))
+                console.error(chalk.red(`  ✗ Failed to load: ${path.basename(file)}`), error)
             }
         }
 
         console.log(chalk.green(`\n✓ Plugins loaded: ${loaded}`))
-        if (failed > 0) {
-            console.log(chalk.red(`✗ Plugins failed: ${failed}`))
-        }
+        if (failed > 0) console.log(chalk.red(`✗ Plugins failed: ${failed}`))
 
         this.categorizePlugins()
-        this.buildAliasMap()
     }
 
     async getPluginFiles(dir, fileList = []) {
-        const files = await readdir(dir)
-
-        for (const file of files) {
+        for (const file of await readdir(dir)) {
             const filePath = path.join(dir, file)
-            const fileStat = await stat(filePath)
-
-            if (fileStat.isDirectory()) {
+            if ((await stat(filePath)).isDirectory()) {
                 await this.getPluginFiles(filePath, fileList)
             } else if (file.endsWith('.js') && !file.startsWith('_')) {
                 fileList.push(filePath)
             }
         }
-
         return fileList
     }
 
     async loadPlugin(filePath) {
-        try {
-            const fileName = path.basename(filePath)
-            const pluginName = fileName.replace('.js', '')
+        const fileName = path.basename(filePath)
+        const pluginName = fileName.replace('.js', '')
 
-            if (this.plugins.has(pluginName)) {
-                await this.unloadPlugin(pluginName)
-            }
+        if (this.plugins.has(pluginName)) await this.unloadPlugin(pluginName)
 
-            // استخدام file:// للاستيراد الصحيح في ES6 Modules
-            const fileUrl = `file://${filePath}?update=${Date.now()}`
-            const module = await import(fileUrl)
-            const plugin = module.default
+        const module = await import(`file://${filePath}?update=${Date.now()}`)
+        const plugin = module.default
 
-            if (!plugin) {
-                throw new Error('Plugin does not export default')
-            }
+        if (!plugin || !plugin.command) throw new Error('Invalid plugin structure')
 
-            if (!plugin.command && !plugin.commands) {
-                throw new Error('Plugin must have command or commands property')
-            }
+        plugin.filePath = filePath
+        plugin.fileName = fileName
 
-            plugin.filePath = filePath
-            plugin.fileName = fileName
-            plugin.loadedAt = Date.now()
-
-            const commands = Array.isArray(plugin.command) ? plugin.command : [plugin.command]
-            if (plugin.commands) {
-                commands.push(...plugin.commands)
-            }
-
-            for (const cmd of commands) {
-                if (this.commands.has(cmd)) {
-                    console.log(chalk.yellow(`  ⚠ Command '${cmd}' already exists, overwriting`))
-                }
-                this.commands.set(cmd, plugin)
-            }
-
-            this.plugins.set(pluginName, plugin)
-            this.initializePluginStats(pluginName)
-
-            console.log(chalk.green(`  ✓ Loaded: ${fileName} (${commands.length} command${commands.length > 1 ? 's' : ''})`))
-
-            return plugin
-        } catch (error) {
-            throw new Error(`Failed to load plugin: ${error.message}`)
+        const commands = Array.isArray(plugin.command) ? plugin.command : [plugin.command]
+        for (const cmd of commands) {
+            if (this.commands.has(cmd)) console.log(chalk.yellow(`  ⚠ Overwriting command '${cmd}'`))
+            this.commands.set(cmd, plugin)
         }
+
+        this.plugins.set(pluginName, plugin)
+        this.initializePluginStats(pluginName)
+        console.log(chalk.green(`  ✓ Loaded: ${fileName} (${commands.length} cmd(s))`))
     }
 
     async unloadPlugin(pluginName) {
@@ -215,669 +139,236 @@ class CrimsonHandler {
         if (!plugin) return
 
         const commands = Array.isArray(plugin.command) ? plugin.command : [plugin.command]
-        if (plugin.commands) {
-            commands.push(...plugin.commands)
-        }
-
-        for (const cmd of commands) {
-            this.commands.delete(cmd)
-        }
+        for (const cmd of commands) this.commands.delete(cmd)
 
         this.plugins.delete(pluginName)
         this.pluginStats.delete(pluginName)
-
         console.log(chalk.yellow(`  ✓ Unloaded: ${pluginName}`))
     }
 
     async reloadPlugin(pluginName) {
         const plugin = this.plugins.get(pluginName)
-        if (!plugin || !plugin.filePath) {
-            throw new Error('Plugin not found or no file path')
-        }
-
-        await this.unloadPlugin(pluginName)
-        await this.loadPlugin(plugin.filePath)
-
+        if (!plugin || !plugin.filePath) throw new Error('Plugin not found')
+        await this.loadPlugin(plugin.filePath) // unload is called from loadPlugin
         console.log(chalk.green(`✓ Reloaded: ${pluginName}`))
-    }
-
-    async reloadPlugins() {
-        console.log(chalk.blue('\n🔄 Reloading all plugins...'))
-
-        const pluginNames = Array.from(this.plugins.keys())
-        let reloaded = 0
-        let failed = 0
-
-        for (const name of pluginNames) {
-            try {
-                await this.reloadPlugin(name)
-                reloaded++
-            } catch (error) {
-                failed++
-                console.log(chalk.red(`  ✗ Failed to reload: ${name}`))
-            }
-        }
-
-        console.log(chalk.green(`\n✓ Reloaded: ${reloaded} plugins`))
-        if (failed > 0) {
-            console.log(chalk.red(`✗ Failed: ${failed} plugins`))
-        }
     }
 
     categorizePlugins() {
         this.categories.clear()
-
         for (const [name, plugin] of this.plugins.entries()) {
-            const category = plugin.tags?.[0] || plugin.category || 'general'
-            
-            if (!this.categories.has(category)) {
-                this.categories.set(category, [])
-            }
-
+            const category = plugin.category || 'general'
+            if (!this.categories.has(category)) this.categories.set(category, [])
             this.categories.get(category).push(name)
         }
     }
 
-    buildAliasMap() {
-        this.aliases.clear()
-
-        for (const [cmd, plugin] of this.commands.entries()) {
-            const allCommands = [
-                ...(Array.isArray(plugin.command) ? plugin.command : [plugin.command]),
-                ...(plugin.commands || [])
-            ]
-
-            for (const command of allCommands) {
-                if (command !== cmd) {
-                    this.aliases.set(command, cmd)
-                }
-            }
-        }
-    }
-
-    // ═══════════════════════════════════════════════════
-    // HOT RELOAD - PLUGIN WATCHER
-    // ═══════════════════════════════════════════════════
-
     async startPluginWatcher() {
         if (this.isWatching) return
-
         console.log(chalk.blue('👁️  Starting plugin watcher...'))
-
         const pluginsDir = path.join(__dirname, 'plugins')
-
-        this.watcher = chokidar.watch(pluginsDir, {
-            ignored: /(^|[\/\\])\../,
-            persistent: true,
-            ignoreInitial: true,
-            awaitWriteFinish: {
-                stabilityThreshold: 500,
-                pollInterval: 100
-            }
-        })
-
-        this.watcher
-            .on('add', (filePath) => this.handlePluginAdd(filePath))
-            .on('change', (filePath) => this.handlePluginChange(filePath))
-            .on('unlink', (filePath) => this.handlePluginRemove(filePath))
-
+        this.watcher = chokidar.watch(pluginsDir, { persistent: true, ignoreInitial: true, awaitWriteFinish: { stabilityThreshold: 500 }})
+            .on('add', async filePath => this.handlePluginEvent(filePath, 'add'))
+            .on('change', async filePath => this.handlePluginEvent(filePath, 'change'))
+            .on('unlink', async filePath => this.handlePluginEvent(filePath, 'unlink'))
         this.isWatching = true
         console.log(chalk.green('✓ Plugin watcher started'))
     }
 
-    async handlePluginAdd(filePath) {
+    async handlePluginEvent(filePath, event) {
         if (!filePath.endsWith('.js') || path.basename(filePath).startsWith('_')) return
+        const pluginName = path.basename(filePath, '.js')
+        const eventHandlers = {
+            add: { msg: `📦 New plugin: ${pluginName}`, action: this.loadPlugin, argument: filePath, success: `✓ Hot loaded` },
+            change: { msg: `🔄 Plugin modified: ${pluginName}`, action: this.reloadPlugin, argument: pluginName, success: `✓ Hot reloaded` },
+            unlink: { msg: `🗑️  Plugin removed: ${pluginName}`, action: this.unloadPlugin, argument: pluginName, success: `✓ Unloaded` }
+        }
+        const handler = eventHandlers[event]
+        if (!handler) return
 
-        console.log(chalk.blue(`\n📦 New plugin detected: ${path.basename(filePath)}`))
-        
+        console.log(chalk.blue(`\n${handler.msg}`))
         try {
-            await this.loadPlugin(filePath)
-            console.log(chalk.green(`✓ Hot loaded: ${path.basename(filePath)}`))
+            await handler.action.call(this, handler.argument)
+            console.log(chalk.green(`${handler.success}: ${pluginName}`))
         } catch (error) {
-            console.log(chalk.red(`✗ Failed to hot load: ${error.message}`))
+            console.error(chalk.red(`✗ Failed to ${event} plugin: ${pluginName}`), error)
         }
     }
 
-    async handlePluginChange(filePath) {
-        if (!filePath.endsWith('.js') || path.basename(filePath).startsWith('_')) return
-
-        const pluginName = path.basename(filePath).replace('.js', '')
-        
-        console.log(chalk.blue(`\n🔄 Plugin modified: ${pluginName}`))
-
-        try {
-            await this.reloadPlugin(pluginName)
-            console.log(chalk.green(`✓ Hot reloaded: ${pluginName}`))
-        } catch (error) {
-            console.log(chalk.red(`✗ Failed to hot reload: ${error.message}`))
-        }
-    }
-
-    async handlePluginRemove(filePath) {
-        if (!filePath.endsWith('.js')) return
-
-        const pluginName = path.basename(filePath).replace('.js', '')
-        
-        console.log(chalk.yellow(`\n🗑️  Plugin removed: ${pluginName}`))
-
-        try {
-            await this.unloadPlugin(pluginName)
-            console.log(chalk.green(`✓ Unloaded: ${pluginName}`))
-        } catch (error) {
-            console.log(chalk.red(`✗ Failed to unload: ${error.message}`))
-        }
-    }
-
-    stopPluginWatcher() {
-        if (this.watcher) {
-            this.watcher.close()
-            this.isWatching = false
-            console.log(chalk.yellow('⚠️  Plugin watcher stopped'))
-        }
-    }
-
-    // ═══════════════════════════════════════════════════
-    // COMMAND EXECUTION
-    // ═══════════════════════════════════════════════════
-
-    async handle(m, messageData) {
-        if (!messageData.isCmd) return
-
-        const { command, args, text } = messageData
-
-        const plugin = this.getPlugin(command)
+    async handleCommand(m, data) {
+        const plugin = this.getPlugin(data.command)
         if (!plugin) return
 
         try {
-            // تنفيذ before hooks
-            for (const hook of this.hooks.beforeCommand) {
-                await hook(m, plugin, args)
-            }
-
-            // تنفيذ middleware
+            for (const hook of this.hooks.beforeCommand) await hook(m, plugin, data.args)
             for (const middleware of this.middleware) {
-                const result = await middleware(m, messageData, plugin)
-                if (result === false) return
+                if (await middleware(m, data, plugin) === false) return
             }
 
-            const context = this.buildContext(m, messageData, plugin)
+            const context = this.buildContext(m, data, plugin)
+            const result = await plugin.handler(m, context)
 
-            // تنفيذ الأمر - دعم كل أنواع الاضافات
-            let result;
-            if (typeof plugin === 'function') {
-                result = await plugin(m, context)
-            } else if (typeof plugin.handler === 'function') {
-                result = await plugin.handler(m, context)
-            } else {
-                throw new Error('Plugin does not have a valid handler function')
-            }
-
-            // تنفيذ after hooks
-            for (const hook of this.hooks.afterCommand) {
-                await hook(m, plugin, result)
-            }
-
-            for (const hook of this.hooks.onSuccess) {
-                await hook(m, plugin)
-            }
+            for (const hook of this.hooks.afterCommand) await hook(m, plugin, result)
+            for (const hook of this.hooks.onSuccess) await hook(m, plugin)
 
         } catch (error) {
-            console.error(chalk.red(`❌ Command error [${command}]:`), error)
-
-            for (const hook of this.hooks.onError) {
-                await hook(m, plugin, error)
-            }
-
-            await this.sendErrorMessage(messageData.from, error, command)
+            console.error(chalk.red(`❌ Command error [${data.command}]:`), error)
+            for (const hook of this.hooks.onError) await hook(m, plugin, error)
+            await this.sendErrorMessage(data.from, error, data.command)
         }
     }
 
     getPlugin(command) {
-        if (this.commands.has(command)) {
-            return this.commands.get(command)
-        }
-
-        if (this.aliases.has(command)) {
-            const mainCommand = this.aliases.get(command)
-            return this.commands.get(mainCommand)
-        }
-
-        return null
+        return this.commands.get(command) || null
     }
 
-    buildContext(m, messageData, plugin) {
+    buildContext(m, data, plugin) {
         return {
+            ...data,
             conn: this.bot.sock,
             bot: this.bot,
             db: this.db,
             handler: this,
             config: this.config,
-            command: messageData.command,
-            usedPrefix: this.config.prefix,
-            prefix: this.config.prefix,
-            args: messageData.args,
-            text: messageData.text,
-            body: messageData.body,
-            from: messageData.from,
-            sender: messageData.sender,
-            pushName: messageData.pushName,
-            isGroup: messageData.isGroup,
-            isOwner: messageData.isOwner,
-            isSubOwner: messageData.isSubOwner,
-            isModerator: messageData.isModerator,
-            isAdmin: messageData.isAdmin,
-            isBotAdmin: messageData.isBotAdmin,
-            groupMetadata: messageData.groupMetadata,
-            groupAdmins: messageData.groupAdmins,
-            quoted: messageData.quoted,
-            mentionedJid: messageData.mentionedJid,
-            isMedia: messageData.isMedia,
-            messageType: messageData.messageType,
-            
-            // الدوال المساعدة
-            reply: async (text, options) => {
-                return await this.bot.reply(messageData.from, text, m, options)
-            },
-            send: async (content, options) => {
-                return await this.bot.sendMessage(messageData.from, content, options)
-            },
-            react: async (emoji) => {
-                return await this.react(m, emoji)
-            },
-            delete: async () => {
-                return await this.deleteMessage(m)
-            },
-            download: async () => {
-                return await this.bot.downloadMediaMessage(m)
-            }
+            usedPrefix: data.body.charAt(0),
+            reply: (text, options) => this.bot.reply(data.from, text, m, options),
+            send: (content, options) => this.bot.sendMessage(data.from, content, options),
+            react: (emoji) => this.react(m, emoji),
+            delete: () => this.deleteMessage(m),
+            download: () => this.bot.downloadMediaMessage(m)
         }
     }
-
-    // ═══════════════════════════════════════════════════
-    // MIDDLEWARE
-    // ═══════════════════════════════════════════════════
-
-    async checkBlacklist(m, data, plugin) {
+    
+    async checkBlacklist(m, data) {
         if (data.isOwner) return true
-
-        const isBlacklisted = await this.db.isBlacklisted(data.sender)
+        const isBlacklisted = await this.db.isBlacklisted(data.sender) || (data.isGroup && await this.db.isGroupBlacklisted(data.from))
         if (isBlacklisted) {
-            console.log(chalk.yellow(`⚠️  Blacklisted user: ${data.sender}`))
+            console.log(chalk.yellow(`⚠️  Blocked request from: ${data.sender} in ${data.from}`))
             return false
         }
-
-        if (data.isGroup) {
-            const isGroupBlacklisted = await this.db.isGroupBlacklisted(data.from)
-            if (isGroupBlacklisted) {
-                console.log(chalk.yellow(`⚠️  Blacklisted group: ${data.from}`))
-                return false
-            }
-        }
-
         return true
     }
 
-    async checkMaintenance(m, data, plugin) {
+    async checkMaintenance(m, data) {
         if (data.isOwner) return true
-
-        const inMaintenance = await this.db.isMaintenanceMode()
-        if (inMaintenance) {
-            await this.bot.reply(data.from, '⚠️ البوت في وضع الصيانة حالياً. يرجى المحاولة لاحقاً.', m)
+        if (await this.db.isMaintenanceMode()) {
+            await this.bot.reply(data.from, '⚠️ Bot is in maintenance. Please try again later.', m)
             return false
         }
-
-        return true
-    }
-
-    async checkAntiSpam(m, data, plugin) {
-        if (data.isOwner || data.isSubOwner) return true
-
-        const spamData = await this.db.getSpamData(data.sender)
-        const now = Date.now()
-
-        if (spamData && now - spamData.lastCommand < 2000) {
-            spamData.count++
-            
-            if (spamData.count >= 5) {
-                await this.db.setSpamData(data.sender, { count: 0, lastCommand: now + 30000 })
-                await this.bot.reply(data.from, '⚠️ تم اكتشاف سبام! يرجى الانتظار 30 ثانية.', m)
-                return false
-            }
-        } else {
-            await this.db.setSpamData(data.sender, { count: 1, lastCommand: now })
-        }
-
         return true
     }
 
     async checkCooldown(m, data, plugin) {
-        if (data.isOwner || data.isSubOwner) return true
-
-        if (!plugin.cooldown) return true
+        if (data.isOwner || !plugin.cooldown) return true
 
         const key = `${data.sender}-${data.command}`
-        const cooldownData = this.cooldowns.get(key)
+        const cooldownEnd = this.cooldowns.get(key)
 
-        if (cooldownData && Date.now() < cooldownData) {
-            const remaining = Math.ceil((cooldownData - Date.now()) / 1000)
-            await this.bot.reply(data.from, `⏰ يرجى الانتظار ${remaining} ثانية قبل استخدام هذا الأمر مرة أخرى.`, m)
+        if (cooldownEnd && Date.now() < cooldownEnd) {
+            const remaining = Math.ceil((cooldownEnd - Date.now()) / 1000)
+            await this.bot.reply(data.from, `⏰ Please wait ${remaining}s before using this command again.`, m)
             return false
         }
 
-        const cooldownTime = plugin.cooldown * 1000
-        this.cooldowns.set(key, Date.now() + cooldownTime)
-
-        setTimeout(() => {
-            this.cooldowns.delete(key)
-        }, cooldownTime)
+        this.cooldowns.set(key, Date.now() + (plugin.cooldown * 1000))
+        setTimeout(() => this.cooldowns.delete(key), plugin.cooldown * 1000)
 
         return true
     }
 
     async checkPermissions(m, data, plugin) {
-        // التحقق من صلاحيات الإضافة
-        if (plugin.group && !data.isGroup) {
-            await this.bot.reply(data.from, '❌ هذا الأمر للمجموعات فقط.', m)
-            return false
+        const checks = {
+            group: { check: () => !data.isGroup, msg: '❌ Group command only.' },
+            private: { check: () => data.isGroup, msg: '❌ Private command only.' },
+            owner: { check: () => !data.isOwner, msg: '❌ Owner command only.' },
+            admin: { check: () => data.isGroup && !data.isAdmin, msg: '❌ Admin command only.' },
+            botAdmin: { check: () => data.isGroup && !data.isBotAdmin, msg: '❌ Bot must be admin.' }
         }
-
-        if (plugin.private && data.isGroup) {
-            await this.bot.reply(data.from, '❌ هذا الأمر للمحادثات الخاصة فقط.', m)
-            return false
-        }
-
-        if (plugin.owner && !data.isOwner) {
-            await this.bot.reply(data.from, '❌ هذا الأمر للمالك فقط.', m)
-            return false
-        }
-
-        if (plugin.admin && data.isGroup && !data.isAdmin && !data.isOwner) {
-            await this.bot.reply(data.from, '❌ هذا الأمر لمشرفي المجموعة فقط.', m)
-            return false
-        }
-
-        if (plugin.botAdmin && data.isGroup && !data.isBotAdmin) {
-            await this.bot.reply(data.from, '❌ يجب أن أكون مشرفاً لتنفيذ هذا الأمر.', m)
-            return false
-        }
-
-        if (plugin.premium) {
-            const isPremium = await this.db.isPremiumUser(data.sender)
-            if (!isPremium && !data.isOwner) {
-                await this.bot.reply(data.from, '❌ هذا الأمر للمشتركين المميزين فقط.', m)
+        for (const perm in checks) {
+            if (plugin[perm] && checks[perm].check()) {
+                await this.bot.reply(data.from, checks[perm].msg, m)
                 return false
             }
         }
-
-        if (plugin.registered) {
-            const isRegistered = await this.db.isRegisteredUser(data.sender)
-            if (!isRegistered) {
-                await this.bot.reply(data.from, `❌ يجب التسجيل أولاً. استخدم ${this.config.prefix}register`, m)
-                return false
-            }
-        }
-
         return true
     }
 
-    async logCommand(m, data, plugin) {
-        const logData = {
-            command: data.command,
-            sender: data.sender,
-            chat: data.from,
-            isGroup: data.isGroup,
-            args: data.args,
-            timestamp: Date.now()
-        }
-
-        await this.db.logCommand(logData)
-
-        console.log(chalk.cyan(
-            `📝 [${data.command}] ${data.pushName} (${data.sender.split('@')[0]}) | ${data.isGroup ? 'Group' : 'Private'}`
-        ))
-
+    async logCommand(m, data) {
+        console.log(chalk.cyan(`📝 [${data.command}] from ${data.pushName} in ${data.isGroup ? 'Group' : 'Private'}`))
         return true
     }
 
     async validateArgs(m, data, plugin) {
-        if (!plugin.args && !plugin.minArgs) return true
-
         const requiredArgs = plugin.minArgs || (plugin.args ? 1 : 0)
-
         if (data.args.length < requiredArgs) {
-            let usage = plugin.usage || `${this.config.prefix}${data.command}`
-            if (plugin.example) {
-                usage += `\n\n*مثال:*\n${plugin.example}`
-            }
-
-            await this.bot.reply(data.from, `❌ استخدام خاطئ!\n\n*الاستخدام الصحيح:*\n${usage}`, m)
+            let usage = `❌ Incorrect usage!\n*Usage:* ${plugin.usage || `${data.body.charAt(0)}${data.command}`}`
+            if (plugin.example) usage += `\n*Example:* ${plugin.example}`
+            await this.bot.reply(data.from, usage, m)
             return false
         }
-
         return true
     }
 
-    // ═══════════════════════════════════════════════════
-    // UTILITIES
-    // ═══════════════════════════════════════════════════
-
     async react(m, emoji) {
-        try {
-            await this.bot.sock.sendMessage(m.key.remoteJid, {
-                react: {
-                    text: emoji,
-                    key: m.key
-                }
-            })
-        } catch (error) {
-            console.error(chalk.red('Failed to send reaction:'), error)
-        }
+        try { await this.bot.sock.sendMessage(m.key.remoteJid, { react: { text: emoji, key: m.key } }) }
+        catch (e) { console.error(chalk.red('Failed to react:'), e) }
     }
 
     async deleteMessage(m) {
-        try {
-            await this.bot.sock.sendMessage(m.key.remoteJid, {
-                delete: m.key
-            })
-        } catch (error) {
-            console.error(chalk.red('Failed to delete message:'), error)
-        }
+        try { await this.bot.sock.sendMessage(m.key.remoteJid, { delete: m.key }) }
+        catch (e) { console.error(chalk.red('Failed to delete:'), e) }
     }
 
     async sendErrorMessage(chatId, error, command) {
-        const errorText = `❌ حدث خطأ أثناء تنفيذ الأمر *${command}*
-
-*الخطأ:* ${error.message}
-
-يرجى المحاولة مرة أخرى أو التواصل مع المطور.`
-
-        try {
-            await this.bot.sendText(chatId, errorText)
-        } catch (e) {
-            console.error(chalk.red('Failed to send error message:'), e)
-        }
+        const errorText = `❌ Error in *${command}*:\n${error.message}`
+        try { await this.bot.sendText(chatId, errorText) }
+        catch (e) { console.error(chalk.red('Failed to send error message:'), e) }
     }
-
-    // ═══════════════════════════════════════════════════
-    // STATISTICS
-    // ═══════════════════════════════════════════════════
 
     initializePluginStats(pluginName) {
-        this.pluginStats.set(pluginName, {
-            timesUsed: 0,
-            successCount: 0,
-            failureCount: 0,
-            lastUsed: null,
-            averageExecutionTime: 0,
-            totalExecutionTime: 0
-        })
+        this.pluginStats.set(pluginName, { used: 0, success: 0, failed: 0, lastUsed: null })
     }
 
-    async updateCommandStats(command) {
+    updateCommandStats(command) {
         const currentCount = this.commandUsage.get(command) || 0
         this.commandUsage.set(command, currentCount + 1)
     }
 
-    async saveCommandHistory(m, plugin, result) {
-        // حفظ في قاعدة البيانات
-        try {
-            const historyData = {
-                plugin: plugin.fileName?.replace('.js', '') || 'unknown',
-                command: plugin.command || 'unknown',
-                user: m.sender,
-                chat: m.chat,
-                timestamp: Date.now(),
-                result: result ? 'success' : 'failed'
-            }
-            await this.db.saveCommandHistory(historyData)
-        } catch (error) {
-            console.error(chalk.red('Failed to save command history:'), error)
-        }
+    saveCommandHistory(m, plugin, result) {
+        // This could be expanded to save to a database
     }
 
-    async handleCommandError(m, plugin, error) {
-        console.error(chalk.red(`Command error: ${error.message}`))
-        
-        const pluginName = plugin.fileName?.replace('.js', '') || 'unknown'
-        const stats = this.pluginStats.get(pluginName)
-        if (stats) {
-            stats.failureCount++
-        }
+    handleCommandError(m, plugin, error) {
+        const stats = this.pluginStats.get(plugin.fileName.replace('.js', ''))
+        if (stats) stats.failed++
     }
 
-    async incrementSuccessCount(command) {
+    incrementSuccessCount(command) {
         const plugin = this.getPlugin(command)
         if (!plugin) return
-
-        const pluginName = plugin.fileName?.replace('.js', '') || 'unknown'
-        const stats = this.pluginStats.get(pluginName)
+        const stats = this.pluginStats.get(plugin.fileName.replace('.js', ''))
         if (stats) {
-            stats.successCount++
-            stats.timesUsed++
+            stats.success++
+            stats.used++
             stats.lastUsed = Date.now()
         }
     }
 
-    // ═══════════════════════════════════════════════════
-    // GETTERS
-    // ═══════════════════════════════════════════════════
-
-    getPluginCount() {
-        return this.plugins.size
-    }
-
-    getCommandCount() {
-        return this.commands.size
-    }
-
-    getCategoryCount() {
-        return this.categories.size
-    }
-
-    getPlugins() {
-        return Array.from(this.plugins.values())
-    }
-
-    getCommands() {
-        return Array.from(this.commands.keys())
-    }
-
-    getCategories() {
-        return Array.from(this.categories.keys())
-    }
-
-    getPluginsByCategory(category) {
-        return this.categories.get(category) || []
-    }
-
-    getPluginInfo(pluginName) {
-        return this.plugins.get(pluginName)
-    }
-
-    getCommandInfo(command) {
-        return this.getPlugin(command)
-    }
-
-    getPluginStats(pluginName) {
-        return this.pluginStats.get(pluginName)
-    }
-
-    getCommandUsage(command) {
-        return this.commandUsage.get(command) || 0
-    }
-
-    getTopCommands(limit = 10) {
-        return Array.from(this.commandUsage.entries())
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, limit)
-    }
-
-    getFailedPlugins() {
-        return Array.from(this.failedPlugins.entries())
-    }
-
-    // ═══════════════════════════════════════════════════
-    // PLUGIN MANAGEMENT
-    // ═══════════════════════════════════════════════════
-
     listPlugins() {
-        console.log(chalk.cyan('\n╔════════════════════════════════════════╗'))
-        console.log(chalk.cyan('║         LOADED PLUGINS                 ║'))
-        console.log(chalk.cyan('╚════════════════════════════════════════╝\n'))
-
+        console.log(chalk.cyan('\n╔═══════════ LOADED PLUGINS ═══════════╗\n'))
         for (const [category, plugins] of this.categories.entries()) {
-            console.log(chalk.yellow(`\n📁 ${category.toUpperCase()}:`))
+            console.log(chalk.yellow(`📁 ${category.toUpperCase()}:`))
             for (const pluginName of plugins) {
                 const plugin = this.plugins.get(pluginName)
-                const commands = Array.isArray(plugin.command) ? plugin.command : [plugin.command]
-                console.log(chalk.white(`  • ${pluginName}`), chalk.gray(`(${commands.join(', ')})`))
+                console.log(chalk.white(`  • ${pluginName}`), chalk.gray(`(${plugin.command.join(', ')})`))
             }
         }
-
         console.log(chalk.cyan('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'))
-        console.log(chalk.white('Total Plugins:'), chalk.green(this.getPluginCount()))
-        console.log(chalk.white('Total Commands:'), chalk.green(this.getCommandCount()))
-        console.log(chalk.white('Categories:'), chalk.green(this.getCategoryCount()))
-        console.log('')
     }
-
-    async enablePlugin(pluginName) {
-        const plugin = this.plugins.get(pluginName)
-        if (!plugin) {
-            throw new Error('Plugin not found')
-        }
-
-        plugin.disabled = false
-        console.log(chalk.green(`✓ Enabled plugin: ${pluginName}`))
-    }
-
-    async disablePlugin(pluginName) {
-        const plugin = this.plugins.get(pluginName)
-        if (!plugin) {
-            throw new Error('Plugin not found')
-        }
-
-        plugin.disabled = true
-        console.log(chalk.yellow(`⚠️  Disabled plugin: ${pluginName}`))
-    }
-
-    isPluginEnabled(pluginName) {
-        const plugin = this.plugins.get(pluginName)
-        return plugin ? !plugin.disabled : false
-    }
-
-    // ═══════════════════════════════════════════════════
-    // CLEANUP
-    // ═══════════════════════════════════════════════════
 
     async cleanup() {
         console.log(chalk.blue('🧹 Cleaning up handler...'))
-
-        this.stopPluginWatcher()
-
+        if (this.watcher) await this.watcher.close()
         this.cooldowns.clear()
-        this.loadQueue = []
-
         console.log(chalk.green('✓ Handler cleanup completed'))
     }
 }
