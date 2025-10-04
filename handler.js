@@ -1,8 +1,8 @@
 import fs from 'fs'
 import path from 'path'
+import { promisify } from 'util'
 import { fileURLToPath } from 'url'
 import chalk from 'chalk'
-import { promisify } from 'util'
 import chokidar from 'chokidar'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -67,15 +67,15 @@ class CrimsonHandler {
     async loadPlugins() {
         console.log(chalk.blue('\n📦 Loading plugins...'))
         const pluginsDir = path.join(__dirname, 'plugins')
+
         if (!fs.existsSync(pluginsDir)) {
             fs.mkdirSync(pluginsDir, { recursive: true })
-            console.log(chalk.yellow('  ⚠ Plugins directory created'))
             return
         }
 
         const files = await this.getPluginFiles(pluginsDir)
         if (files.length === 0) {
-            console.log(chalk.yellow('  ⚠ No plugins found'))
+            console.log(chalk.yellow('⚠ No plugins found'))
             return
         }
 
@@ -87,7 +87,7 @@ class CrimsonHandler {
             } catch (error) {
                 failed++
                 this.failedPlugins.set(file, error.message)
-                console.error(chalk.red(`  ✗ Failed to load: ${path.basename(file)}`), error)
+                console.error(chalk.red(`✗ Failed to load: ${path.basename(file)}`), error)
             }
         }
 
@@ -122,16 +122,16 @@ class CrimsonHandler {
 
         plugin.filePath = filePath
         plugin.fileName = fileName
-
         const commands = Array.isArray(plugin.command) ? plugin.command : [plugin.command]
         for (const cmd of commands) {
-            if (this.commands.has(cmd)) console.log(chalk.yellow(`  ⚠ Overwriting command '${cmd}'`))
+            if (this.commands.has(cmd))
+                console.log(chalk.yellow(`⚠ Overwriting command '${cmd}'`))
             this.commands.set(cmd, plugin)
         }
 
         this.plugins.set(pluginName, plugin)
         this.initializePluginStats(pluginName)
-        console.log(chalk.green(`  ✓ Loaded: ${fileName} (${commands.length} cmd(s))`))
+        console.log(chalk.green(`✓ Loaded: ${fileName} (${commands.length} cmd(s))`))
     }
 
     async unloadPlugin(pluginName) {
@@ -143,13 +143,13 @@ class CrimsonHandler {
 
         this.plugins.delete(pluginName)
         this.pluginStats.delete(pluginName)
-        console.log(chalk.yellow(`  ✓ Unloaded: ${pluginName}`))
+        console.log(chalk.yellow(`✓ Unloaded: ${pluginName}`))
     }
 
     async reloadPlugin(pluginName) {
         const plugin = this.plugins.get(pluginName)
         if (!plugin || !plugin.filePath) throw new Error('Plugin not found')
-        await this.loadPlugin(plugin.filePath) // unload is called from loadPlugin
+        await this.loadPlugin(plugin.filePath)
         console.log(chalk.green(`✓ Reloaded: ${pluginName}`))
     }
 
@@ -166,7 +166,11 @@ class CrimsonHandler {
         if (this.isWatching) return
         console.log(chalk.blue('👁️  Starting plugin watcher...'))
         const pluginsDir = path.join(__dirname, 'plugins')
-        this.watcher = chokidar.watch(pluginsDir, { persistent: true, ignoreInitial: true, awaitWriteFinish: { stabilityThreshold: 500 }})
+        this.watcher = chokidar.watch(pluginsDir, {
+            persistent: true,
+            ignoreInitial: true,
+            awaitWriteFinish: { stabilityThreshold: 500 }
+        })
             .on('add', async filePath => this.handlePluginEvent(filePath, 'add'))
             .on('change', async filePath => this.handlePluginEvent(filePath, 'change'))
             .on('unlink', async filePath => this.handlePluginEvent(filePath, 'unlink'))
@@ -209,7 +213,6 @@ class CrimsonHandler {
 
             for (const hook of this.hooks.afterCommand) await hook(m, plugin, result)
             for (const hook of this.hooks.onSuccess) await hook(m, plugin)
-
         } catch (error) {
             console.error(chalk.red(`❌ Command error [${data.command}]:`), error)
             for (const hook of this.hooks.onError) await hook(m, plugin, error)
@@ -237,7 +240,7 @@ class CrimsonHandler {
             download: () => this.bot.downloadMediaMessage(m)
         }
     }
-    
+
     async checkBlacklist(m, data) {
         if (data.isOwner) return true
         const isBlacklisted = await this.db.isBlacklisted(data.sender) || (data.isGroup && await this.db.isGroupBlacklisted(data.from))
@@ -333,9 +336,7 @@ class CrimsonHandler {
         this.commandUsage.set(command, currentCount + 1)
     }
 
-    saveCommandHistory(m, plugin, result) {
-        // This could be expanded to save to a database
-    }
+    saveCommandHistory(m, plugin, result) { }
 
     handleCommandError(m, plugin, error) {
         const stats = this.pluginStats.get(plugin.fileName.replace('.js', ''))
